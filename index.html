@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM functions in ChalkSQL</title>
+<style>
+  /* Chalk marketing palette: green-1 ground, chartreuse primary, mint accents. */
+  :root { --bg:#224A41; --panel:#1C3B34; --line:#32645B; --ink:#EFF5F3; --muted:#B9CFC7;
+          --accent:#BBD96D; --mint:#70CD96; --warn:#F8947F; --code:#173029; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .mono { font-family:ui-monospace,"SFMono-Regular",Menlo,monospace; }
+  .wrap { display:grid; grid-template-columns:240px 1fr; min-height:100vh; }
+  html.embed .wrap { min-height:0; }
+  nav { border-right:1px solid var(--line); padding:16px 12px; display:flex; flex-direction:column; gap:6px; }
+  nav h1 { font-size:15px; font-weight:500; margin:0 4px 10px; }
+  html.embed nav h1 { display:none; }
+  .preset { text-align:left; background:transparent; border:1px solid transparent; border-radius:4px; color:var(--ink);
+            padding:8px 10px; cursor:pointer; font:inherit; }
+  .preset:hover { border-color:var(--line); }
+  .preset.on { background:var(--panel); border-color:var(--line); }
+  .preset .fn { display:block; font:11px/16px ui-monospace,Menlo,monospace; color:var(--mint); text-transform:uppercase; letter-spacing:.04em; }
+  main { padding:16px 20px; display:flex; flex-direction:column; gap:12px; min-width:0; }
+  .blurb { color:var(--muted); margin:0; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  label { font:11px/16px ui-monospace,Menlo,monospace; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  select, input { background:var(--panel); border:1px solid var(--line); color:var(--ink); border-radius:4px; padding:7px 9px; font:inherit; }
+  input { flex:1; min-width:200px; }
+  button.run { font:13px/15px ui-monospace,Menlo,monospace; text-transform:uppercase; letter-spacing:.06em; border:1px solid var(--accent);
+               border-radius:20px; padding:9px 20px; background:var(--accent); color:var(--bg); cursor:pointer; }
+  button.run:hover { background:transparent; color:var(--accent); }
+  button.run:disabled { opacity:.5; cursor:default; }
+  pre { margin:0; background:var(--code); border:1px solid var(--line); border-radius:4px; padding:12px 14px; overflow:auto;
+        font:12.5px/1.55 ui-monospace,Menlo,monospace; color:#D7E9E1; max-height:240px; white-space:pre; }
+  pre .kw { color:var(--mint); } pre .fnc { color:var(--accent); } pre .str { color:#E9C893; } pre .ph { color:var(--warn); }
+  .stats { display:flex; gap:16px; flex-wrap:wrap; font:12px/16px ui-monospace,Menlo,monospace; color:var(--muted); min-height:16px; }
+  .stats b { color:var(--ink); font-weight:500; }
+  .err { color:var(--warn); }
+  .tablewrap { overflow:auto; border:1px solid var(--line); border-radius:4px; max-height:420px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th { position:sticky; top:0; background:var(--panel); text-align:left; font:11px/16px ui-monospace,Menlo,monospace;
+       text-transform:uppercase; letter-spacing:.05em; color:var(--muted); padding:8px 10px; border-bottom:1px solid var(--line); }
+  td { padding:7px 10px; border-bottom:1px solid rgba(50,100,91,.5); vertical-align:top; }
+  td.model { color:var(--accent); }
+  td.null { color:#6E8F86; font-style:italic; }
+  td.body { color:var(--muted); min-width:260px; }
+  @media (max-width: 720px) {
+    .wrap { grid-template-columns:1fr; }
+    nav { border-right:0; border-bottom:1px solid var(--line); flex-direction:row; overflow-x:auto; }
+    .preset { flex:0 0 auto; }
+  }
+</style>
+<script>
+  if (new URLSearchParams(location.search).has("embed")) document.documentElement.classList.add("embed");
+</script>
+</head>
+<body>
+<div class="wrap">
+  <nav id="presets"><h1>LLM functions in ChalkSQL</h1></nav>
+  <main>
+    <p class="blurb" id="blurb"></p>
+    <div class="row">
+      <label for="model">Model</label>
+      <select id="model"></select>
+      <span id="qwrap" class="row" style="flex:1; display:none">
+        <label for="question">Question</label>
+        <input id="question" maxlength="160">
+      </span>
+      <button class="run" id="run">Run query</button>
+    </div>
+    <pre id="sql"></pre>
+    <div class="stats" id="stats"></div>
+    <div class="tablewrap"><table id="out"></table></div>
+  </main>
+</div>
+<script>
+const AI_FUNCS = /\b(ai_classify|ai_extract|ai_score|ai_filter|openai_complete)\b/g;
+const KW = /\b(SELECT|FROM|WHERE|AND|ORDER BY|GROUP BY|LIMIT|AS|DESC|count_if|count|round)\b/g;
+let config = null, current = null, inflight = false;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+function highlight(sql) {
+  // Strings first, so keywords inside them stay plain; then placeholders, functions and keywords.
+  return esc(sql).split(/('(?:[^']|'')*')/).map((part, i) => {
+    if (i % 2) return `<span class="str">${part}</span>`;
+    return part.replace(/(:gateway_(?:url|key))/g, '<span class="ph">$1</span>')
+               .replace(AI_FUNCS, '<span class="fnc">$1</span>')
+               .replace(KW, '<span class="kw">$1</span>');
+  }).join("");
+}
+
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  return data;
+}
+
+function request() {
+  const q = $("question").value.trim();
+  return { preset: current.id, model: $("model").value, question: current.custom_question && q ? q : null };
+}
+
+async function showSql() {
+  try { $("sql").innerHTML = highlight((await api("/api/sql", request())).sql); } catch (e) { /* keep the last SQL */ }
+}
+
+function select(p) {
+  current = p;
+  document.querySelectorAll(".preset").forEach((b) => b.classList.toggle("on", b.dataset.id === p.id));
+  $("blurb").textContent = p.blurb;
+  $("qwrap").style.display = p.custom_question ? "flex" : "none";
+  $("question").value = p.default_question;
+  $("out").innerHTML = ""; $("stats").textContent = "";
+  showSql();
+  run();
+}
+
+function render(res) {
+  // The ticket or review text goes last, so the model's answers sit next to the row's id.
+  const order = res.columns.map((_, i) => i).sort((a, b) => (res.columns[a] === "body") - (res.columns[b] === "body"));
+  const cols = order.map((i) => res.columns[i]);
+  const rows = res.rows.map((r) => order.map((i) => r[i]));
+  const modelCols = new Set(current.model_columns);
+  const head = "<tr>" + cols.map((c) => `<th>${esc(c)}</th>`).join("") + "</tr>";
+  const body = rows.map((r) => "<tr>" + r.map((v, i) => {
+    const c = cols[i];
+    const cls = v === null ? "null" : modelCols.has(c) ? "model" : c === "body" ? "body" : "";
+    const shown = v === null ? "NULL" : c === "score" ? (v * 100).toFixed(1) + "%" : v;
+    return `<td class="${cls}">${esc(shown)}</td>`;
+  }).join("") + "</tr>").join("");
+  $("out").innerHTML = head + body;
+  const stats = [
+    `<span><b>${rows.length}</b> rows</span>`,
+    `<span><b>${(res.elapsed_ms / 1000).toFixed(1)} s</b> ${res.cached ? "when first run (cached)" : "end to end"}</span>`,
+    `<span>model <b>${esc(res.model)}</b></span>`,
+  ];
+  const pi = cols.indexOf("prompt_tokens"), ci = cols.indexOf("completion_tokens");
+  if (pi >= 0 && ci >= 0) {
+    const sum = (k) => rows.reduce((a, r) => a + (r[k] || 0), 0);
+    stats.push(`<span><b>${sum(pi) + sum(ci)}</b> tokens (${sum(pi)} in, ${sum(ci)} out)</span>`);
+  }
+  stats.push(`<span>query <b>${esc(res.query_id.slice(0, 8))}</b></span>`);
+  $("stats").innerHTML = stats.join("");
+}
+
+async function run() {
+  if (inflight || !current) return;
+  inflight = true; $("run").disabled = true;
+  $("stats").textContent = "Running on Chalk…";
+  try {
+    const res = await api("/api/run", request());
+    $("sql").innerHTML = highlight(res.sql);
+    render(res);
+  } catch (e) {
+    $("stats").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    inflight = false; $("run").disabled = false;
+  }
+}
+
+(async () => {
+  config = await api("/api/config");
+  $("model").innerHTML = config.models.map((m) => `<option>${esc(m)}</option>`).join("");
+  for (const p of config.presets) {
+    const b = document.createElement("button");
+    b.className = "preset"; b.dataset.id = p.id;
+    b.innerHTML = `<span class="fn">${esc(p.function)}</span>${esc(p.title)}`;
+    b.onclick = () => select(p);
+    $("presets").appendChild(b);
+  }
+  $("run").onclick = run;
+  $("model").onchange = () => { showSql(); run(); };
+  $("question").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+  $("question").addEventListener("input", () => { clearTimeout(window._t); window._t = setTimeout(showSql, 250); });
+  select(config.presets[0]);
+})();
+</script>
+</body>
+</html>
