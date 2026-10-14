@@ -80,6 +80,13 @@ const KW = /\b(SELECT|FROM|WHERE|AND|ORDER BY|GROUP BY|LIMIT|AS|DESC|count_if|co
 let config = null, current = null, inflight = false;
 
 const $ = (id) => document.getElementById(id);
+
+// When embedded, report the visitor's actions to the host page's analytics. Labels are fixed
+// values (a preset id or a model name), never the visitor's question or any result.
+function report(action, label) {
+  if (window.parent === window) return;
+  window.parent.postMessage({ type: "chalk-demo-interaction", action, label }, "*");
+}
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 
 function highlight(sql) {
@@ -108,8 +115,9 @@ async function showSql() {
   try { $("sql").innerHTML = highlight((await api("/api/sql", request())).sql); } catch (e) { /* keep the last SQL */ }
 }
 
-function select(p) {
+function select(p, byVisitor) {
   current = p;
+  if (byVisitor) report("select_preset", p.id);
   document.querySelectorAll(".preset").forEach((b) => b.classList.toggle("on", b.dataset.id === p.id));
   $("blurb").textContent = p.blurb;
   $("qwrap").style.display = p.custom_question ? "flex" : "none";
@@ -147,12 +155,18 @@ function render(res) {
   $("stats").innerHTML = stats.join("");
 }
 
-async function run() {
+// Runs the current preset. Only an explicit run (the button or Enter) is reported; the automatic
+// runs after a preset or model change are covered by their own select_* events.
+async function run(byVisitor) {
   if (inflight || !current) return;
   inflight = true; $("run").disabled = true;
+  const req = request();
+  if (byVisitor) {
+    report(req.question && req.question !== current.default_question ? "run_custom_question" : "run_query", current.id);
+  }
   $("stats").textContent = "Running on Chalk…";
   try {
-    const res = await api("/api/run", request());
+    const res = await api("/api/run", req);
     $("sql").innerHTML = highlight(res.sql);
     render(res);
   } catch (e) {
@@ -169,12 +183,12 @@ async function run() {
     const b = document.createElement("button");
     b.className = "preset"; b.dataset.id = p.id;
     b.innerHTML = `<span class="fn">${esc(p.function)}</span>${esc(p.title)}`;
-    b.onclick = () => select(p);
+    b.onclick = () => select(p, true);
     $("presets").appendChild(b);
   }
-  $("run").onclick = run;
-  $("model").onchange = () => { showSql(); run(); };
-  $("question").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+  $("run").onclick = () => run(true);
+  $("model").onchange = () => { report("select_model", $("model").value); showSql(); run(); };
+  $("question").addEventListener("keydown", (e) => { if (e.key === "Enter") run(true); });
   $("question").addEventListener("input", () => { clearTimeout(window._t); window._t = setTimeout(showSql, 250); });
   select(config.presets[0]);
 })();
