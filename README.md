@@ -70,3 +70,10 @@ rate-limited per visitor and overall.
 ## License
 
 Apache-2.0. Thistle & Pine and all of its tickets and reviews are fictional.
+
+## Local authentication
+
+The SDK reads credentials, API host, and the selected environment from your existing
+`chalk login` in `~/.chalk.yml`, including project-scoped and default logins.
+For unattended runs, `CHALK_CLIENT_ID` and `CHALK_CLIENT_SECRET` remain supported. Where available, `--env-id`
+overrides the target environment; otherwise the SDK uses your login or environment settings.
