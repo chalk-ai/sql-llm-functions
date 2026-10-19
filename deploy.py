@@ -13,17 +13,13 @@ comes from a Chalk secret:
     chalk router api-key create            # once; store the key as a secret
     chalk secrets set CHALK_ROUTER_API_KEY=<key>
 
-Credentials for the deploy itself come from `chalk config` (or the CHALK_* env vars):
+Credentials for the deploy itself come from your existing `chalk login` (or the CHALK_* env vars):
 
-    ./deploy.py [--env-id <environment>] [--name sql-llm-functions]
+    ./deploy.py
 """
 
 from __future__ import annotations
 
-import argparse
-import json
-import os
-import subprocess
 import time
 from pathlib import Path
 
@@ -31,28 +27,7 @@ HERE = Path(__file__).resolve().parent
 APP_FILES = ["server.py", "queries.py", "data.py", "index.html"]
 
 
-def load_chalk_env(env_id: str | None) -> None:
-    if "CHALK_CLIENT_ID" not in os.environ:
-        cfg = json.loads(subprocess.check_output(["chalk", "config", "--json"]))
-        os.environ["CHALK_API_SERVER"] = cfg["apiServer"]["value"]
-        os.environ["CHALK_CLIENT_ID"] = cfg["clientId"]["value"]
-        os.environ["CHALK_CLIENT_SECRET"] = cfg["clientSecret"]["value"]
-        os.environ.setdefault("CHALK_ENVIRONMENT_ID", cfg["environment"]["value"])
-    if env_id:
-        os.environ["CHALK_ENVIRONMENT_ID"] = env_id
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--name", default="sql-llm-functions")
-    parser.add_argument(
-        "--env-id", default=None, help="defaults to the environment in `chalk config`"
-    )
-    parser.add_argument("--key-secret", default="CHALK_ROUTER_API_KEY")
-    parser.add_argument("--ready-timeout", type=float, default=900.0)
-    args = parser.parse_args()
-
-    load_chalk_env(args.env_id)
     from chalkcompute import Image, ReadinessProbe, ScalingGroup, Secret
 
     image = Image.debian_slim(python_version="3.12").pip_install(
@@ -72,15 +47,13 @@ def main() -> None:
 
     sg = ScalingGroup(
         image=image,
-        name=args.name,
+        name='sql-llm-functions',
         cpu="500m",
         memory="1Gi",
         env={
             # Not secrets: where ChalkSQL and the model gateway live.
-            "CHALK_API_SERVER": os.environ["CHALK_API_SERVER"],
-            "CHALK_ENVIRONMENT_ID": os.environ["CHALK_ENVIRONMENT_ID"],
             "PORT": "8080",
-            "ROUTER_API_KEY": Secret.from_chalk_env(args.key_secret),
+            "ROUTER_API_KEY": Secret.from_chalk_env('CHALK_ROUTER_API_KEY'),
         },
         entrypoint=["python", "/app/server.py"],
         port=8080,
@@ -92,7 +65,7 @@ def main() -> None:
     )
     t0 = time.monotonic()
     try:
-        sg.deploy(build_timeout=1200.0, ready_timeout=args.ready_timeout)
+        sg.deploy(build_timeout=1200.0, ready_timeout=900.0)
     finally:
         print(f"deploy returned after {time.monotonic() - t0:.0f}s")
     print("web_url:", sg.web_url)
