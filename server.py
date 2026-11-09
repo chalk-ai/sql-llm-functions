@@ -42,6 +42,16 @@ log = logging.getLogger("sql-llm-demo")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 app = FastAPI()
+
+
+# This host exists only to back a chalk.ai/demos page; keep it out of search results.
+@app.middleware("http")
+async def add_noindex_header(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+
 sql = SQLClient()
 _running = asyncio.Semaphore(MAX_CONCURRENT_QUERIES)
 _cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
